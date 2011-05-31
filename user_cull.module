@@ -1,0 +1,116 @@
+<?php
+
+function user_cull_menu() {
+    return array(
+        'admin/user/cull' => array(
+            'title' => t('Cull Users'),
+            'page callback' => 'drupal_get_form',
+            'page arguments' => array('user_cull_form'),
+            'access arguments' => array('administer users'),
+        ),
+    );
+}
+
+function user_cull_form(&$form_state) {
+    return array(
+        '#attributes' => array(
+            'enctype' => 'multipart/form-data',
+        ),
+
+        '#prefix' => '<p>' . t('Upload a CSV of usernames and/or email addresses to cull. They, and all the content they have added to this site, will be deleted entirely.') . '</p>',
+
+        'csv' => array(
+            '#type' => 'file',
+            '#title' => t('CSV File'),
+            '#description' => 'A file with one column (any others will be ignored) containing usernames and/or emails',
+        ),
+
+        'buttons' => array(
+            'submit' => array(
+                '#type' => 'submit',
+                '#value' => t('Cull Users'),
+            ),
+        ),
+    );
+}
+
+function user_cull_form_submit($form, &$form_state) {
+    header("Content-Type: text/plain");
+
+    $file = file_save_upload('csv');
+
+    $batch = array(
+        'title' => t('Culling User Accounts'),
+        'operations' => array(
+            array('user_cull_batch', array($file)),
+        ),
+        'finished' => 'user_cull_finished',
+        'init_message' => t('Initializing.'),
+        'progress_message' => t('Culling user accounts...'),
+        'error_message' => t('An error occurred while culling user accounts.'),
+    );
+
+    batch_set($batch);
+}
+
+function user_cull_batch($file, &$context) {
+    if (empty($context['sandbox'])) { 
+        $context['sandbox']['position'] = 0;
+        $context['sandbox']['size'] = $file->filesize;
+        $context['results']['count'] = 0;
+    }
+
+    $fd = fopen($file->filepath, 'r');
+    if (!$fd)
+        return $context['results']['error'] = 'Could not open CSV file.';
+
+    if (fseek($fd, $context['sandbox']['position']) != 0)
+        return $context['results']['error'] = 'Could not seek in CSV file.';
+
+    $row = fgetcsv($fd);
+    if (!empty($row)) {
+        if (strpos($row[0], '@')) {
+            $user = user_load(array('mail' => $row[0]));
+        } else {
+            $user = user_load(array('name' => $row[0]));
+        }
+
+        if (!empty($user)) {
+            $context['message'] = t('Found user %user; deleting.', array('%user' => $user->name));
+            $context['results']['count']++;
+
+            user_delete(array(), $user->uid);
+        } else {
+            $context['message'] = t('Couldn\'t find user %user; skipping.', array('%user' => $row[0]));
+        }
+    }
+
+    $context['sandbox']['position'] = ftell($fd);
+    if ($context['sandbox']['position'] == 0)
+        return $context['results']['error'] = 'Could not read position in CSV file.';
+
+    fclose($fd);
+
+    if ($context['sandbox']['position'] != $context['sandbox']['size']) {
+        $context['finished'] = $context['sandbox']['position'] / $context['sandbox']['size'];
+    } else {
+        // We've finished
+        db_query("DELETE FROM {files} WHERE fid = %d", $file->fid);
+        file_delete($file->filepath);
+    }
+}
+
+function user_cull_finished($success, $results, $operations) {
+    if (!empty($results['error'])) {
+        $message = t($results['error']);
+    } else if ($success && empty($results['count'])) {
+        $message = t('Found no users to cull! Did you upload an empty or mal-formed file?');
+    } else if ($success) {
+        $message = format_plural($results['count'], 'Culled one user account.', 'Culled @count user accounts.');
+    } else {
+        $message = t('An error occurred while culling user accounts.');
+    }
+
+    drupal_set_message($message);
+}
+
